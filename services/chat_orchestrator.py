@@ -11,7 +11,7 @@ class ChatOrchestrator:
     def __init__(self, db_client: SupabaseClient):
         self.db_client = db_client
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-pro", # 3. Chọn model phù hợp (ví dụ: gemini-pro)
+            model="gemini-2.5-flash", # 3. Chọn model phù hợp (ví dụ: gemini-2.5-pro)
             temperature=0.7,
             # streaming=True là mặc định, không cần thiết phải ghi rõ
             google_api_key=settings.google_api_key
