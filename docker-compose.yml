@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  panello-ai:
+    build: .
+    container_name: panello-ai-service
+    env_file:
+      - .env
+    environment:
+      # Override any environment variables if needed
+      - HOST=0.0.0.0
+      - PORT=${DOCKER_PORT:-8000}
+    ports:
+      # Map custom host port to container port 8000
+      # Change the left side (host port) to your desired port
+      - "${HOST_PORT:-8080}:8000"
+    volumes:
+      # Mount source code for development (optional, remove for production)
+      - ./:/app
+      # Prevent node_modules and other files from being overwritten
+      - /app/__pycache__
+    restart: unless-stopped
+    networks:
+      - panello-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  panello-network:
+    driver: bridge
