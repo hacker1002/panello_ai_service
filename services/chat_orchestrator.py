@@ -107,15 +107,6 @@ class ChatOrchestrator:
         messages = self._get_chat_history(room_id, thread_id)
         chat_history = self._format_chat_history(messages, ai_name)
         
-        # Save user message
-        self._save_message(
-            room_id=room_id,
-            thread_id=thread_id,
-            content=user_prompt,
-            sender_type=1,  # user
-            sender_id=user_id
-        )
-        
         # Build the prompt using system_prompt
         template = """{system_prompt}
 

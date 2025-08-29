@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from typing import Optional
 
@@ -13,6 +13,17 @@ class ChatRequest(BaseModel):
     ai_id: str
     user_prompt: str
     user_id: Optional[str] = None
+
+@router.options("/chat/stream")
+async def chat_stream_options():
+    """Handle OPTIONS preflight request for CORS"""
+    return Response(
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+        }
+    )
 
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
