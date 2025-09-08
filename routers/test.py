@@ -40,13 +40,37 @@ async def test_chat_stream(request: TestChatStreamRequest):
             yield f"data: [INFO] Starting chat stream...\n\n"
             yield f"data: ---\n\n"
             
+            # First save the user message
+            import uuid
+            from datetime import datetime
+            supabase: Client = create_client(settings.supabase_url, settings.supabase_key)
+            
+            user_message_data = {
+                'id': str(uuid.uuid4()),
+                'room_id': request.room_id,
+                'thread_id': request.thread_id,
+                'content': request.user_prompt,
+                'sender_type': 1,  # user
+                'sender_id': request.user_id,
+                'ai_id_list': [request.ai_id],
+                'created_at': datetime.utcnow().isoformat()
+            }
+            
+            message_response = supabase.table('messages').insert(user_message_data).execute()
+            user_message_id = message_response.data[0]['id'] if message_response.data else None
+            
+            if not user_message_id:
+                yield f"data: [ERROR] Failed to save user message\n\n"
+                return
+            
+            yield f"data: [INFO] User message saved with ID: {user_message_id}\n\n"
+            
             # Stream the actual response
             async for chunk in orchestrator.stream_response(
                 room_id=request.room_id,
                 thread_id=request.thread_id,
                 ai_id=request.ai_id,
-                user_prompt=request.user_prompt,
-                user_id=request.user_id
+                user_message_id=user_message_id
             ):
                 yield f"data: {chunk}\n\n"
                 await asyncio.sleep(0.01)  # Small delay for smooth streaming
@@ -168,21 +192,68 @@ async def test_chat_stream_mock():
             def mock_save_message(*args, **kwargs):
                 return 'mock-message-id'
             
+            # Mock upsert streaming message
+            def mock_upsert_streaming_message(*args, **kwargs):
+                return 'mock-streaming-id'
+            
+            # Mock complete streaming message
+            def mock_complete_streaming_message(*args, **kwargs):
+                return 'mock-final-message-id'
+            
+            # Mock cleanup
+            def mock_cleanup_incomplete_streaming_messages(*args, **kwargs):
+                pass
+            
+            # Create a mock database client with chained methods
+            class MockTable:
+                def __init__(self, data=None):
+                    self.data = data or {}
+                
+                def select(self, *args):
+                    return self
+                
+                def eq(self, *args):
+                    return self
+                
+                def single(self):
+                    return self
+                
+                def execute(self):
+                    class MockResponse:
+                        def __init__(self, data):
+                            self.data = data
+                    return MockResponse({
+                        'content': 'Explain how to create a simple FastAPI endpoint',
+                        'sender_id': 'mock-user'
+                    })
+            
+            class MockDBClient:
+                def table(self, name):
+                    if name == 'messages':
+                        return MockTable()
+                    return MockTable()
+            
             # Replace methods with mocks
             orchestrator._get_ai_info = mock_get_ai_info
             orchestrator._get_chat_history = mock_get_chat_history
             orchestrator._save_message = mock_save_message
+            orchestrator._upsert_streaming_message = mock_upsert_streaming_message
+            orchestrator._complete_streaming_message = mock_complete_streaming_message
+            orchestrator.cleanup_incomplete_streaming_messages = mock_cleanup_incomplete_streaming_messages
+            orchestrator.db_client = MockDBClient()  # Mock the database client
             
             yield f"data: [INFO] Starting mock chat stream...\n\n"
             yield f"data: ---\n\n"
+            
+            # Create a mock user message ID
+            mock_user_message_id = 'mock-user-message-id-001'
             
             # Stream the response
             async for chunk in orchestrator.stream_response(
                 room_id='mock-room',
                 thread_id='mock-thread',
                 ai_id='mock-ai',
-                user_prompt='Explain how to create a simple FastAPI endpoint',
-                user_id='mock-user'
+                user_message_id=mock_user_message_id
             ):
                 yield f"data: {chunk}\n\n"
                 await asyncio.sleep(0.01)

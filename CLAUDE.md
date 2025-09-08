@@ -31,24 +31,44 @@ cp .env.example .env
 
 ## Architecture Overview
 
-This is a **streaming AI chat service** built with FastAPI that provides mentor-based conversational experiences. The service integrates with Google's Gemini Pro model via LangChain and uses Supabase for data persistence.
+This is a **streaming AI chat service** built with FastAPI that provides mentor-based conversational experiences with real-time multi-client synchronization. The service integrates with Google's Gemini models via LangChain and uses Supabase for data persistence and real-time updates.
 
-### Request Flow
-1. **API Layer** (`routers/chat.py`): Receives chat requests with user_id, ai_id, and user_prompt
-2. **Orchestration** (`services/chat_orchestrator.py`): 
-   - Fetches AI configuration from Supabase `ai` table (model, system_prompt, name)
-   - Retrieves last 10 messages from `messages` table
+### Request Flow (Updated with Streaming Messages)
+
+1. **Client Preparation**: User message is saved to `messages` table by the client
+2. **API Layer** (`routers/chat.py`): Receives chat request with `user_message_id`
+3. **Orchestration** (`services/chat_orchestrator.py`): 
+   - Cleans up any incomplete streaming messages for the room/thread
+   - Fetches AI configuration from `ai` table (model, system_prompt, name)
+   - Retrieves user message content using `user_message_id`
+   - Fetches last 10 messages from `messages` table for context
    - Constructs contextualized prompt using system_prompt
-3. **AI Processing**: Streams response from Google Gemini model (uses model from DB or defaults to gemini-2.5-flash)
-4. **Response**: Returns Server-Sent Events (SSE) stream to client
+4. **Streaming Process**:
+   - As chunks arrive from Gemini, they're upserted to `streaming_messages` table
+   - Other clients can subscribe to `streaming_messages` changes for real-time updates
+   - Each chunk is also sent via SSE to the requesting client
+5. **Completion**:
+   - When streaming completes, `complete_streaming_message()` is called
+   - Final message is saved to `messages` table
+   - Streaming message is marked as complete
 
 ### Key Integration Points
 
 **Supabase Tables:**
 - `ai`: Stores AI configurations (id, name, model, system_prompt)
-  - `model`: Specifies which Gemini model to use (null defaults to gemini-2.5-flash)
+  - `model`: Specifies which Gemini model to use (null defaults to gemini-2.0-flash-exp)
   - `system_prompt`: The AI's behavioral instructions
-- `messages`: Stores conversations (room_id, thread_id, content, sender_type, sender_id)
+- `messages`: Permanent message storage (room_id, thread_id, content, sender_type, sender_id)
+- `streaming_messages`: Temporary streaming state for active AI responses
+  - `content`: Accumulated streaming content
+  - `is_complete`: Whether streaming has finished
+  - `final_message_id`: Reference to final message once complete
+  - `user_message_id`: The user message being responded to
+
+**Supabase Functions (RPC):**
+- `upsert_streaming_message`: Creates or updates streaming message
+- `complete_streaming_message`: Finalizes streaming and creates message record
+- `cleanup_old_streaming_messages`: Removes old completed streaming records
 
 **External Services:**
 - Google Gemini API (via GOOGLE_API_KEY)
@@ -56,12 +76,23 @@ This is a **streaming AI chat service** built with FastAPI that provides mentor-
 
 ### Service Layer Pattern
 
-The `ChatOrchestrator` class in `services/chat_orchestrator.py` is the core business logic handler. When modifying chat behavior:
-- AI info retrieval: `_get_ai_info()` method
-- History management: `_get_chat_history()` method  
-- Model selection: `_get_llm()` method (uses model from DB or defaults)
-- Streaming logic: `stream_response()` method
-- System prompt usage: Directly from `system_prompt` field in `ai` table
+The `ChatOrchestrator` class in `services/chat_orchestrator.py` is the core business logic handler:
+
+**Core Methods:**
+- `stream_response()`: Main streaming method (now accepts `user_message_id` instead of `user_prompt`)
+- `_get_ai_info()`: Fetches AI configuration
+- `_get_chat_history()`: Retrieves conversation context
+- `_get_llm()`: Initializes appropriate Gemini model
+- `_save_message()`: Saves messages to database
+- `_upsert_streaming_message()`: Updates streaming state
+- `_complete_streaming_message()`: Finalizes streaming
+- `cleanup_incomplete_streaming_messages()`: Cleanup on start
+
+**Important Changes:**
+- User messages are now saved BEFORE calling the streaming API
+- The API accepts `user_message_id` instead of raw prompt text
+- Streaming messages provide real-time synchronization across clients
+- Automatic cleanup prevents orphaned streaming messages
 
 ### Configuration Management
 
