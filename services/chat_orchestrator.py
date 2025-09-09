@@ -10,7 +10,12 @@ from core.supabase_client import supabase_client
 from core.config import settings
 
 # Configure logging
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(asctime)s - %(name)s - %(message)s')
+
 logger = logging.getLogger(__name__)
+
+# Moderator AI
+MODERATOR_AI_ID = "10000000-0000-0000-0000-000000000007"
 
 class ChatOrchestrator:
     def __init__(self):
@@ -20,7 +25,7 @@ class ChatOrchestrator:
     def _get_ai_info(self, ai_id: str) -> Optional[Dict[str, Any]]:
         """Fetch AI info from the 'ai' table"""
         try:
-            response = self.db_client.table('ai').select('model, system_prompt, name').eq('id', ai_id).single().execute()
+            response = self.db_client.table('ai').select('model, system_prompt, description, personality, name').eq('id', ai_id).single().execute()
             return response.data
         except Exception as e:
             logger.error(f"Error fetching AI info for AI ID {ai_id}: {e}")
@@ -57,6 +62,79 @@ class ChatOrchestrator:
             history_str += f"{sender_name}: {msg['content']}\n"
         
         return history_str
+    
+    def _build_enhanced_system_prompt(self, base_prompt: str, ai_name: str, 
+                                     description: str, personality: str) -> str:
+        """Build enhanced system prompt for normal AIs with description and personality"""
+        enhanced_prompt = base_prompt
+        
+        # Add description and personality if available
+        if description or personality:
+            enhanced_prompt += "\n\n## About You:"
+            
+            if description:
+                enhanced_prompt += f"\nDescription: {description}"
+            
+            if personality:
+                enhanced_prompt += f"\nPersonality: {personality}"
+            
+            enhanced_prompt += f"\n\nYour name is {ai_name}. Respond according to your described personality and expertise."
+        
+        return enhanced_prompt
+    
+    def _build_moderator_system_prompt(self, base_prompt: str, room_id: str,
+                                      ai_name: str, description: str, personality: str) -> str:
+        """Build system prompt for moderator AI including available AIs in the room"""
+        # Start with enhanced base prompt
+        enhanced_prompt = self._build_enhanced_system_prompt(
+            base_prompt, ai_name, description, personality
+        )
+        
+        # Get all AIs in the room
+        try:
+            # Fetch room AIs
+            room_ai_response = self.db_client.table('room_ai')\
+                .select('ai_id')\
+                .eq('room_id', room_id)\
+                .eq('is_active', True)\
+                .execute()
+            
+            if room_ai_response.data:
+                # Filter out the moderator AI to avoid self-reference
+                ai_ids = [ra['ai_id'] for ra in room_ai_response.data 
+                         if ra['ai_id'] != MODERATOR_AI_ID]
+                
+                if ai_ids:  # Only proceed if there are non-moderator AIs
+                    # Fetch AI details for all non-moderator AIs in the room
+                    ai_details_response = self.db_client.table('ai')\
+                        .select('id, name, description, personality')\
+                        .in_('id', ai_ids)\
+                        .eq('is_active', True)\
+                        .execute()
+                    
+                    if ai_details_response.data:
+                        # Filter out moderator again (extra safety) and build available AIs section
+                        non_moderator_ais = [ai for ai in ai_details_response.data 
+                                            if ai.get('id') != MODERATOR_AI_ID]
+                        
+                        if non_moderator_ais:
+                            enhanced_prompt += "\n\n## Available AI Mentors in this room:"
+                            
+                            for ai in non_moderator_ais:
+                                enhanced_prompt += f"\n- Name: {ai['name']}"
+                                if ai.get('description'):
+                                    enhanced_prompt += f". Description: {ai['description']}"
+                                if ai.get('personality'):
+                                    enhanced_prompt += f". Personality: {ai['personality']}"
+                                enhanced_prompt += "."
+                            
+                            enhanced_prompt += "\n\nAs the moderator, you can help users choose the right AI mentor based on their needs. DON'T CHOOSE YOURSELF!"
+                    
+        except Exception as e:
+            logger.warning(f"Error fetching room AIs for moderator prompt: {e}")
+            # Continue with base prompt if fetching room AIs fails
+        
+        return enhanced_prompt
 
     def _get_llm(self, model: Optional[str] = None) -> ChatGoogleGenerativeAI:
         """Get LLM instance with the specified model"""
@@ -223,10 +301,26 @@ class ChatOrchestrator:
                 )
                 return
             
-            # Get model and system prompt
+            # Get AI attributes
             model = ai_info.get('model')
-            system_prompt = ai_info.get('system_prompt', 'You are a helpful AI assistant.')
+            base_system_prompt = ai_info.get('system_prompt', 'You are a helpful AI assistant.')
             ai_name = ai_info.get('name', 'Assistant')
+            description = ai_info.get('description', '')
+            personality = ai_info.get('personality', '')
+            
+            # Build enhanced system prompt
+            if ai_id == MODERATOR_AI_ID:
+                # For moderator AI, include available AIs in the room
+                system_prompt = self._build_moderator_system_prompt(
+                    base_system_prompt, room_id, ai_name, description, personality
+                )
+            else:
+                # For normal AI, enhance with description and personality
+                system_prompt = self._build_enhanced_system_prompt(
+                    base_system_prompt, ai_name, description, personality
+                )
+
+            logger.info(f"system_prompt: {system_prompt}")
             
             # Get LLM instance
             llm = self._get_llm(model)
@@ -327,10 +421,24 @@ Assistant:"""
             yield "Error: Failed to fetch user message"
             return
         
-        # Get model and system prompt
+        # Get AI attributes
         model = ai_info.get('model')
-        system_prompt = ai_info.get('system_prompt', 'You are a helpful AI assistant.')
+        base_system_prompt = ai_info.get('system_prompt', 'You are a helpful AI assistant.')
         ai_name = ai_info.get('name', 'Assistant')
+        description = ai_info.get('description', '')
+        personality = ai_info.get('personality', '')
+        
+        # Build enhanced system prompt
+        if ai_id == MODERATOR_AI_ID:
+            # For moderator AI, include available AIs in the room
+            system_prompt = self._build_moderator_system_prompt(
+                base_system_prompt, room_id, ai_name, description, personality
+            )
+        else:
+            # For normal AI, enhance with description and personality
+            system_prompt = self._build_enhanced_system_prompt(
+                base_system_prompt, ai_name, description, personality
+            )
         
         # Get LLM instance with the appropriate model
         llm = self._get_llm(model)
