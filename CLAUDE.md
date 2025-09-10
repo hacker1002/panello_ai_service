@@ -33,10 +33,13 @@ cp .env.example .env
 
 This is a **streaming AI chat service** built with FastAPI that provides mentor-based conversational experiences with real-time multi-client synchronization. The service integrates with Google's Gemini models via LangChain and uses Supabase for data persistence and real-time updates.
 
-### Request Flow (Updated with Streaming Messages)
+### Request Flow (Updated with Streaming Messages and Lock Mechanism)
 
 1. **Client Preparation**: User message is saved to `messages` table by the client
 2. **API Layer** (`routers/chat.py`): Receives chat request with `user_message_id`
+   - **Lock Check**: Verifies no existing request is processing for same room_id/thread_id
+   - If locked: Returns HTTP 409 (Conflict) immediately
+   - If available: Acquires lock for exclusive processing
 3. **Orchestration** (`services/chat_orchestrator.py`): 
    - Cleans up any incomplete streaming messages for the room/thread
    - Fetches AI configuration from `ai` table (model, system_prompt, name)
@@ -51,6 +54,7 @@ This is a **streaming AI chat service** built with FastAPI that provides mentor-
    - When streaming completes, `complete_streaming_message()` is called
    - Final message is saved to `messages` table
    - Streaming message is marked as complete
+   - **Lock Release**: Lock is automatically released for the room_id/thread_id
 
 ### Key Integration Points
 
@@ -90,11 +94,18 @@ The `ChatOrchestrator` class in `services/chat_orchestrator.py` is the core busi
 - `_extract_ai_name_from_moderator_response()`: Extracts selected AI name from moderator response
 - `_get_ai_id_by_name()`: Retrieves AI ID by name from room's available AIs
 
+**Lock Manager** (`services/lock_manager.py`):
+- `acquire_lock()`: Async context manager for exclusive access to room/thread
+- `is_locked()`: Check if room/thread is currently being processed
+- `get_active_locks()`: Monitor active locks for debugging
+- Automatic cleanup of unused locks to prevent memory leaks
+
 **Important Changes:**
 - User messages are now saved BEFORE calling the streaming API
 - The API accepts `user_message_id` instead of raw prompt text
 - Streaming messages provide real-time synchronization across clients
 - Automatic cleanup prevents orphaned streaming messages
+- Lock mechanism prevents concurrent processing for same room/thread
 
 ### Moderator Flow
 
@@ -162,6 +173,22 @@ curl -X POST http://localhost:8000/test/chat-stream \
 curl -X POST http://localhost:8000/test/chat-stream-mock
 ```
 
+#### 5. Test Lock Mechanism
+```bash
+# Simulate long-running request (holds lock for 5 seconds)
+curl -X POST http://localhost:8000/test/lock-simulation \
+  -H "Content-Type: application/json" \
+  -d '{"room_id": "test-room", "thread_id": "test-thread", "duration": 5}'
+
+# Check active locks
+curl http://localhost:8000/test/lock-status
+
+# Test concurrent lock behavior (5 simultaneous attempts)
+curl -X POST http://localhost:8000/test/concurrent-lock-test \
+  -H "Content-Type: application/json" \
+  -d '{"room_id": "test-room", "thread_id": "test-thread"}'
+```
+
 ### Testing Flow
 
 1. **Start the server**: `uvicorn main:app --reload`
@@ -169,6 +196,7 @@ curl -X POST http://localhost:8000/test/chat-stream-mock
 3. **Check AI config**: Use `/test/ai-info/{ai_id}` to verify model and system_prompt
 4. **Test streaming**: Use `/test/chat-stream` with the AI ID
 5. **Mock testing**: Use `/test/chat-stream-mock` for database-independent testing
+6. **Test locks**: Use lock testing endpoints to verify concurrent request protection
 
 ### Expected Behavior
 
@@ -176,3 +204,4 @@ curl -X POST http://localhost:8000/test/chat-stream-mock
 - System prompts define AI behavior and personality
 - Streaming responses use Server-Sent Events (SSE) format
 - Chat history is maintained per room/thread combination
+- **Concurrent Protection**: Second request to same room/thread receives HTTP 409 while first is processing

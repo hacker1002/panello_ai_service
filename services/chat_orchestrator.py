@@ -384,7 +384,7 @@ IMPORTANT: Always use the exact AI name as listed above and put it between ** **
                     base_system_prompt, ai_name, description, personality
                 )
 
-            logger.info(f"system_prompt: {system_prompt}")
+            # logger.info(f"system_prompt: {system_prompt}")
             
             # Get LLM instance
             llm = self._get_llm(model)

@@ -9,6 +9,7 @@ A high-performance streaming AI chat service built with FastAPI, designed for re
 - **Multi-Client Sync**: All clients in a room receive updates automatically
 - **Conversation Context**: Maintains chat history within rooms and threads
 - **Model Flexibility**: Support for multiple Google Gemini models
+- **Concurrent Request Protection**: Lock mechanism prevents duplicate processing for same room/thread
 - **Production Ready**: Built-in error handling, logging, and cleanup mechanisms
 
 ## 🚀 New Architecture (v2.0)
@@ -182,6 +183,14 @@ curl -X POST http://localhost:8000/test/chat-stream-mock
 curl -X POST http://localhost:8000/test/chat-stream \
   -H "Content-Type: application/json" \
   -d '{"ai_id": "your-ai-id", "user_prompt": "Hello"}'
+
+# Test lock mechanism
+curl -X POST http://localhost:8000/test/lock-simulation \
+  -H "Content-Type: application/json" \
+  -d '{"room_id": "test-room", "thread_id": "test-thread", "duration": 5}'
+
+# Check active locks
+curl http://localhost:8000/test/lock-status
 ```
 
 ### Health Check
@@ -227,13 +236,14 @@ WHERE id = 'your-ai-id';
 - **Batched updates** to reduce database writes
 - **Horizontal scaling** ready
 
-## 🔒 Security
+## 🔒 Security & Reliability
 
 - Row Level Security (RLS) on all tables
 - Input validation with Pydantic models
 - Environment variables for sensitive data
 - Rate limiting recommended for production
 - Supabase authentication integration ready
+- **Concurrent Request Protection**: Automatic lock mechanism prevents duplicate AI processing for the same room/thread combination, returning HTTP 409 for conflicting requests
 
 ## 🐛 Troubleshooting
 
