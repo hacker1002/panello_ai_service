@@ -5,6 +5,8 @@ from typing import AsyncGenerator, Optional, List, Dict, Any
 from datetime import datetime
 import uuid
 import logging
+import re
+import asyncio
 
 from core.supabase_client import supabase_client
 from core.config import settings
@@ -128,7 +130,13 @@ class ChatOrchestrator:
                                     enhanced_prompt += f". Personality: {ai['personality']}"
                                 enhanced_prompt += "."
                             
-                            enhanced_prompt += "\n\nAs the moderator, you can help users choose the right AI mentor based on their needs. DON'T CHOOSE YOURSELF!"
+                            enhanced_prompt += """\n\nAs the moderator, you can help users choose the right AI mentor based on their needs. DON'T CHOOSE YOURSELF!
+
+When you decide to forward a user to a specific AI mentor, you MUST use this exact format:
+Forward to AI mentor: **{AI name}**.
+Reason is {reason why you choose them in max 100 words}
+
+IMPORTANT: Always use the exact AI name as listed above and put it between ** ** markers."""
                     
         except Exception as e:
             logger.warning(f"Error fetching room AIs for moderator prompt: {e}")
@@ -201,6 +209,62 @@ class ChatOrchestrator:
             return response.data if response.data else None
         except Exception as e:
             logger.error(f"Error completing streaming message {streaming_id}: {e}")
+            return None
+    
+    def _extract_ai_name_from_moderator_response(self, response: str) -> Optional[str]:
+        """Extract AI name from moderator response format: Forward to AI mentor: **{AI name}**"""
+        try:
+            # Use regex to extract AI name between ** **
+            pattern = r'\*\*([^*]+)\*\*'
+            matches = re.findall(pattern, response)
+            
+            if matches:
+                # Return the first match (should be the AI name)
+                ai_name = matches[0].strip()
+                logger.info(f"Extracted AI name from moderator response: {ai_name}")
+                return ai_name
+            else:
+                logger.warning(f"Could not extract AI name from moderator response: {response[:100]}...")
+                return None
+        except Exception as e:
+            logger.error(f"Error extracting AI name from moderator response: {e}")
+            return None
+    
+    def _get_ai_id_by_name(self, ai_name: str, room_id: str) -> Optional[str]:
+        """Get AI ID by name from the room's available AIs"""
+        try:
+            # First get all AIs in the room
+            room_ai_response = self.db_client.table('room_ai')\
+                .select('ai_id')\
+                .eq('room_id', room_id)\
+                .eq('is_active', True)\
+                .execute()
+            
+            if not room_ai_response.data:
+                logger.warning(f"No AIs found in room {room_id}")
+                return None
+            
+            ai_ids = [ra['ai_id'] for ra in room_ai_response.data]
+            
+            # Now get AI details and match by name
+            ai_details_response = self.db_client.table('ai')\
+                .select('id, name')\
+                .in_('id', ai_ids)\
+                .eq('is_active', True)\
+                .execute()
+            
+            if ai_details_response.data:
+                for ai in ai_details_response.data:
+                    # Case-insensitive comparison
+                    if ai['name'].lower() == ai_name.lower():
+                        logger.info(f"Found AI ID {ai['id']} for name {ai_name}")
+                        return ai['id']
+            
+            logger.warning(f"Could not find AI with name {ai_name} in room {room_id}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting AI ID by name {ai_name}: {e}")
             return None
     
     def cleanup_incomplete_streaming_messages(self, room_id: str, thread_id: str) -> None:
@@ -370,8 +434,46 @@ Assistant:"""
                 )
             
             # Complete the streaming message
-            self._complete_streaming_message(streaming_message_id)
+            final_message_id = self._complete_streaming_message(streaming_message_id)
             logger.info(f"Completed processing for streaming message {streaming_message_id}")
+            
+            # Check if this was a moderator response and if it selected an AI
+            if ai_id == MODERATOR_AI_ID and full_response:
+                logger.info("Checking if moderator selected an AI to forward to...")
+                selected_ai_name = self._extract_ai_name_from_moderator_response(full_response)
+                
+                if selected_ai_name:
+                    selected_ai_id = self._get_ai_id_by_name(selected_ai_name, room_id)
+                    
+                    if selected_ai_id:
+                        logger.info(f"Moderator selected AI {selected_ai_name} (ID: {selected_ai_id}). Triggering next stream...")
+                        
+                        # Create a new streaming message for the selected AI
+                        next_streaming_id = self.initialize_streaming_message(
+                            room_id=room_id,
+                            thread_id=thread_id,
+                            ai_id=selected_ai_id,
+                            user_message_id=user_message_id  # Use the same user message
+                        )
+                        
+                        if next_streaming_id:
+                            # Process the next AI response in the background
+                            logger.info(f"Starting background processing for selected AI {selected_ai_id}")
+                            asyncio.create_task(
+                                self.process_streaming_response(
+                                    room_id=room_id,
+                                    thread_id=thread_id,
+                                    ai_id=selected_ai_id,
+                                    user_message_id=user_message_id,
+                                    streaming_message_id=next_streaming_id
+                                )
+                            )
+                        else:
+                            logger.error(f"Failed to initialize streaming message for selected AI {selected_ai_id}")
+                    else:
+                        logger.warning(f"Could not find AI ID for selected AI name: {selected_ai_name}")
+                else:
+                    logger.info("Moderator response did not select a specific AI")
             
         except Exception as e:
             logger.error(f"Error processing streaming response: {e}")
@@ -495,7 +597,45 @@ Assistant:"""
             
             # Complete the streaming message and create final message
             if streaming_message_id:
-                self._complete_streaming_message(streaming_message_id)
+                final_message_id = self._complete_streaming_message(streaming_message_id)
+                
+                # Check if this was a moderator response and if it selected an AI
+                if ai_id == MODERATOR_AI_ID and full_response:
+                    logger.info("Checking if moderator selected an AI to forward to...")
+                    selected_ai_name = self._extract_ai_name_from_moderator_response(full_response)
+                    
+                    if selected_ai_name:
+                        selected_ai_id = self._get_ai_id_by_name(selected_ai_name, room_id)
+                        
+                        if selected_ai_id:
+                            logger.info(f"Moderator selected AI {selected_ai_name} (ID: {selected_ai_id}). Triggering next stream...")
+                            
+                            # Create a new streaming message for the selected AI
+                            next_streaming_id = self.initialize_streaming_message(
+                                room_id=room_id,
+                                thread_id=thread_id,
+                                ai_id=selected_ai_id,
+                                user_message_id=user_message_id  # Use the same user message
+                            )
+                            
+                            if next_streaming_id:
+                                # Process the next AI response in the background
+                                logger.info(f"Starting background processing for selected AI {selected_ai_id}")
+                                asyncio.create_task(
+                                    self.process_streaming_response(
+                                        room_id=room_id,
+                                        thread_id=thread_id,
+                                        ai_id=selected_ai_id,
+                                        user_message_id=user_message_id,
+                                        streaming_message_id=next_streaming_id
+                                    )
+                                )
+                            else:
+                                logger.error(f"Failed to initialize streaming message for selected AI {selected_ai_id}")
+                        else:
+                            logger.warning(f"Could not find AI ID for selected AI name: {selected_ai_name}")
+                    else:
+                        logger.info("Moderator response did not select a specific AI")
         
         except Exception as e:
             logger.error(f"Error during streaming for room {room_id}, thread {thread_id}: {e}")

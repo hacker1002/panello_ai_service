@@ -87,12 +87,38 @@ The `ChatOrchestrator` class in `services/chat_orchestrator.py` is the core busi
 - `_upsert_streaming_message()`: Updates streaming state
 - `_complete_streaming_message()`: Finalizes streaming
 - `cleanup_incomplete_streaming_messages()`: Cleanup on start
+- `_extract_ai_name_from_moderator_response()`: Extracts selected AI name from moderator response
+- `_get_ai_id_by_name()`: Retrieves AI ID by name from room's available AIs
 
 **Important Changes:**
 - User messages are now saved BEFORE calling the streaming API
 - The API accepts `user_message_id` instead of raw prompt text
 - Streaming messages provide real-time synchronization across clients
 - Automatic cleanup prevents orphaned streaming messages
+
+### Moderator Flow
+
+The system includes a special moderator AI (ID: `10000000-0000-0000-0000-000000000007`) that can automatically forward users to the most appropriate AI mentor:
+
+**Moderator Process:**
+1. When `ai_id == MODERATOR_AI_ID`, the system builds an enhanced prompt including all available AIs in the room
+2. The moderator AI responds with a specific format when selecting an AI:
+   ```
+   Forward to AI mentor: **{AI name}**.
+   Reason is {reason why you choose them in max 100 words}
+   ```
+3. After the moderator completes streaming, the backend:
+   - Extracts the AI name using regex pattern `**{AI name}**`
+   - Looks up the AI ID by name from the room's available AIs
+   - Automatically triggers a new stream to the selected AI
+   - Uses the same `user_message_id` for continuity
+
+**Key Features:**
+- The moderator cannot select itself (self-reference prevention)
+- Case-insensitive AI name matching
+- Automatic background processing of the next AI stream
+- Real-time updates via streaming_messages table
+- Graceful handling if no AI is selected or found
 
 ### Configuration Management
 

@@ -106,7 +106,30 @@ async process_streaming_response(room_id, thread_id, ai_id, user_message_id, str
 
 # Cleanup incomplete streams
 cleanup_incomplete_streaming_messages(room_id, thread_id)
+
+# Extract AI name from moderator response (for moderator flow)
+_extract_ai_name_from_moderator_response(response: str) -> Optional[str]
+
+# Get AI ID by name from room's available AIs (for moderator flow)
+_get_ai_id_by_name(ai_name: str, room_id: str) -> Optional[str]
 ```
+
+### Moderator Flow
+
+The system includes a special moderator AI (ID: `10000000-0000-0000-0000-000000000007`) that can automatically forward users to appropriate AI mentors:
+
+1. **Detection**: When `ai_id == MODERATOR_AI_ID`, the system builds an enhanced prompt with all available AIs in the room
+2. **Response Format**: The moderator uses a specific format:
+   ```
+   Forward to AI mentor: **{AI name}**.
+   Reason is {reason why you choose them in max 100 words}
+   ```
+3. **Auto-Trigger**: After moderator completes streaming:
+   - Extract AI name using regex pattern `**{AI name}**`
+   - Look up AI ID by name (case-insensitive)
+   - Automatically trigger new stream to selected AI
+   - Use same `user_message_id` for continuity
+4. **Real-time Updates**: Both moderator and selected AI responses update via `streaming_messages` table
 
 ## Multi-Client Synchronization
 
