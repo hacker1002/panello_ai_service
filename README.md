@@ -243,7 +243,12 @@ WHERE id = 'your-ai-id';
 - Environment variables for sensitive data
 - Rate limiting recommended for production
 - Supabase authentication integration ready
-- **Concurrent Request Protection**: Automatic lock mechanism prevents duplicate AI processing for the same room/thread combination, returning HTTP 409 for conflicting requests
+- **Thread Lock System**: 
+  - Database-based locks in `thread_locks` table prevent concurrent message processing
+  - Automatic transition from user locks to AI locks
+  - Fault tolerance: Server handles locks if client fails
+  - Auto-expiry prevents permanent locks (30-120 seconds TTL)
+  - Returns HTTP 409 with wait time for concurrent requests
 
 ## 🐛 Troubleshooting
 

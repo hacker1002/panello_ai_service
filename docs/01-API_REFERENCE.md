@@ -195,14 +195,36 @@ Tests concurrent lock acquisition with 5 simultaneous attempts.
 
 ## Concurrent Request Protection
 
-The API implements a lock mechanism to prevent concurrent processing of requests for the same room_id and thread_id combination:
+The API uses database thread locks to prevent concurrent processing:
 
-- **First request**: Acquires lock and processes normally
-- **Concurrent requests**: Receive HTTP 409 (Conflict) immediately
-- **Lock release**: Automatic on completion or error
-- **Memory management**: Unused locks are cleaned up automatically
+### Database Thread Locks
+- **Purpose**: Prevent concurrent message processing and coordinate across services
+- **Table**: `thread_locks` in Supabase
+- **Implementation**: `services/lock_manager.py`
 
-This ensures data consistency and prevents duplicate AI responses when multiple clients or requests target the same conversation simultaneously.
+### Lock Flow
+1. **Client attempts lock**: Client tries to acquire lock before sending message (`acquire_thread_lock`)
+2. **Server verification**: Server fetches user message and checks lock status:
+   - `ai_streaming` lock → Reject with HTTP 409
+   - `user_message` lock by different user → Reject with HTTP 409
+   - `user_message` lock by same user → Transition to AI lock
+   - No lock → Create new AI lock
+3. **Lock transition**: Server transitions or creates AI lock (`transition_lock_to_ai`)
+4. **Processing**: AI processes with exclusive thread access
+5. **Release**: Server releases lock after AI completes (`release_thread_lock`)
+
+### Lock Types
+- `user_message`: User is sending a message
+- `ai_streaming`: AI is generating a response
+
+### Features
+- **Fault Tolerance**: Server automatically handles locks if client fails
+- **Auto-expiry**: Locks expire after 30-120 seconds to prevent deadlocks
+- **Conflict Detection**: Returns HTTP 409 with wait time for concurrent requests
+- **Error Recovery**: Locks are released on errors to prevent deadlocks
+- **Cross-service**: Works across multiple service instances
+
+This simplified database-only locking system ensures data consistency, prevents duplicate AI responses, and provides reliable concurrency control across all services.
 
 ## Rate Limiting
 

@@ -6,7 +6,7 @@ import asyncio
 import logging
 
 from services.chat_orchestrator import ChatOrchestrator
-from services.lock_manager import lock_manager, ConflictException
+from services.lock_manager import lock_manager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -58,94 +58,91 @@ async def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
     if not request.user_message_id:
         raise HTTPException(status_code=400, detail="user_message_id cannot be empty")
     
-    # Check for concurrent requests before acquiring lock
-    if lock_manager.is_locked(request.room_id, request.thread_id):
-        logger.warning(f"Concurrent request blocked for room {request.room_id}, thread {request.thread_id}")
+    # Get user profile_id from the user message
+    orchestrator = ChatOrchestrator()
+    user_message = orchestrator.get_message_by_id(request.user_message_id)
+    if not user_message:
+        raise HTTPException(status_code=404, detail="User message not found")
+    
+    user_profile_id = user_message.get('sender_id')
+    
+    # Check database lock status
+    lock_status = lock_manager.check_thread_lock(request.thread_id)
+    if lock_status and lock_status.get('is_locked'):
+        lock_type = lock_status.get('lock_type')
+        locked_by = lock_status.get('locked_by_profile_id')
+        
+        if lock_type == 'ai_streaming':
+            # AI is already processing, reject
+            logger.warning(f"AI already processing for thread {request.thread_id}")
+            raise HTTPException(
+                status_code=409,
+                detail=f"AI is already processing a response for this thread. Please wait."
+            )
+        elif lock_type == 'user_message':
+            # Check if the lock belongs to the user who sent this message
+            if locked_by != user_profile_id:
+                # Different user has the lock
+                logger.warning(f"Thread {request.thread_id} locked by different user: {locked_by} != {user_profile_id}")
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Another user is currently sending a message. Please wait."
+                )
+            # Same user has the lock, we can transition it
+            logger.info(f"User {user_profile_id} has lock for thread {request.thread_id}, will transition to AI")
+    
+    # Try to acquire or transition the database lock to AI
+    lock_result = lock_manager.transition_to_ai_lock(request.thread_id, request.ai_id)
+    if not lock_result or not lock_result.get('success'):
+        logger.warning(f"Could not acquire AI lock for thread {request.thread_id}")
         raise HTTPException(
-            status_code=409, 
-            detail=f"Another request is already being processed for room {request.room_id} and thread {request.thread_id}. Please wait for it to complete."
+            status_code=409,
+            detail="Could not acquire lock for processing. Another request may be in progress."
         )
     
+    logger.info(f"Acquired AI lock for thread {request.thread_id}, processing request")
+    
     try:
-        # Acquire lock for this room/thread combination
-        async with lock_manager.acquire_lock(request.room_id, request.thread_id):
-            logger.info(f"Processing chat request for room {request.room_id}, thread {request.thread_id}")
-            
-            # Initialize orchestrator
-            orchestrator = ChatOrchestrator()
-            
-            # Initialize streaming message and get its ID
-            streaming_message_id = orchestrator.initialize_streaming_message(
-                room_id=request.room_id,
-                thread_id=request.thread_id,
-                ai_id=request.ai_id,
-                user_message_id=request.user_message_id
-            )
-            
-            if not streaming_message_id:
-                raise HTTPException(status_code=500, detail="Failed to initialize streaming message")
-            
-            # Process AI response in background with protected execution
-            background_tasks.add_task(
-                _process_with_lock_protection,
-                orchestrator=orchestrator,
-                room_id=request.room_id,
-                thread_id=request.thread_id,
-                ai_id=request.ai_id,
-                user_message_id=request.user_message_id,
-                streaming_message_id=streaming_message_id
-            )
-            
-            return ChatResponse(
-                streaming_message_id=streaming_message_id,
-                status="processing"
-            )
-            
-    except ConflictException as e:
-        logger.warning(f"Lock conflict for room {request.room_id}, thread {request.thread_id}: {str(e)}")
-        raise HTTPException(
-            status_code=409, 
-            detail=f"Another request is already being processed for room {request.room_id} and thread {request.thread_id}. Please wait for it to complete."
+        # Initialize orchestrator
+        orchestrator = ChatOrchestrator()
+        
+        # Initialize streaming message and get its ID
+        streaming_message_id = orchestrator.initialize_streaming_message(
+            room_id=request.room_id,
+            thread_id=request.thread_id,
+            ai_id=request.ai_id,
+            user_message_id=request.user_message_id
         )
+        
+        if not streaming_message_id:
+            # Release lock on error
+            lock_manager.release_thread_lock(request.thread_id, request.ai_id)
+            raise HTTPException(status_code=500, detail="Failed to initialize streaming message")
+        
+        # Process AI response in background (lock will be released by orchestrator after completion)
+        background_tasks.add_task(
+            orchestrator.process_streaming_response,
+            room_id=request.room_id,
+            thread_id=request.thread_id,
+            ai_id=request.ai_id,
+            user_message_id=request.user_message_id,
+            streaming_message_id=streaming_message_id
+        )
+        
+        return ChatResponse(
+            streaming_message_id=streaming_message_id,
+            status="processing"
+        )
+            
     except Exception as e:
+        # Release lock on any unexpected error
+        try:
+            lock_manager.release_thread_lock(request.thread_id, request.ai_id)
+        except:
+            pass
+        
         logger.error(f"Unexpected error in chat_stream for room {request.room_id}, thread {request.thread_id}: {str(e)}")
+        if isinstance(e, HTTPException):
+            raise
         raise HTTPException(status_code=500, detail="Internal server error occurred while processing request")
 
-
-async def _process_with_lock_protection(orchestrator: ChatOrchestrator, room_id: str, 
-                                       thread_id: str, ai_id: str, user_message_id: str,
-                                       streaming_message_id: str):
-    """
-    Protected wrapper for background processing that ensures proper lock management.
-    
-    This function acquires its own lock to ensure the background task has exclusive access
-    to the room/thread combination during processing.
-    """
-    try:
-        async with lock_manager.acquire_lock(room_id, thread_id):
-            await orchestrator.process_streaming_response(
-                room_id=room_id,
-                thread_id=thread_id,
-                ai_id=ai_id,
-                user_message_id=user_message_id,
-                streaming_message_id=streaming_message_id
-            )
-    except ConflictException:
-        # This should not happen since we already have the lock, but handle gracefully
-        logger.error(f"Unexpected lock conflict in background task for room {room_id}, thread {thread_id}")
-        # Mark streaming message as failed
-        try:
-            orchestrator._upsert_streaming_message(
-                streaming_id=streaming_message_id,
-                room_id=room_id,
-                thread_id=thread_id,
-                ai_id=ai_id,
-                user_message_id=user_message_id,
-                content="Error: Processing was interrupted due to lock conflict",
-                is_complete=True
-            )
-        except Exception as e:
-            logger.error(f"Failed to mark streaming message as failed: {e}")
-    except Exception as e:
-        logger.error(f"Error in background processing for room {room_id}, thread {thread_id}: {e}")
-        # The orchestrator should handle marking the message as complete with error

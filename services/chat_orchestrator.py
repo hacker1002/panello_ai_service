@@ -23,6 +23,15 @@ class ChatOrchestrator:
     def __init__(self):
         self.db_client = supabase_client
         # LLM will be initialized dynamically based on AI model
+    
+    def get_message_by_id(self, message_id: str) -> Optional[dict]:
+        """Get a message by its ID"""
+        try:
+            response = self.db_client.from_('messages').select('*').eq('id', message_id).single().execute()
+            return response.data
+        except Exception as e:
+            logger.error(f"Error fetching message {message_id}: {e}")
+            return None
 
     def _get_ai_info(self, ai_id: str) -> Optional[Dict[str, Any]]:
         """Fetch AI info from the 'ai' table"""
@@ -210,6 +219,19 @@ IMPORTANT: Always use the exact AI name as listed above and put it between ** **
         except Exception as e:
             logger.error(f"Error completing streaming message {streaming_id}: {e}")
             return None
+    
+    def _release_thread_lock(self, thread_id: str, ai_id: str):
+        """Release the thread lock after AI completes streaming"""
+        from services.lock_manager import lock_manager
+        
+        try:
+            success = lock_manager.release_thread_lock(thread_id, ai_id)
+            if not success:
+                logger.warning(f"Failed to release thread lock for thread {thread_id}")
+            return success
+        except Exception as e:
+            logger.error(f"Error releasing thread lock for thread {thread_id}: {e}")
+            # Don't raise - we want to complete even if lock release fails
     
     def _extract_ai_name_from_moderator_response(self, response: str) -> Optional[str]:
         """Extract AI name from moderator response format: Forward to AI mentor: **{AI name}**"""
@@ -437,6 +459,13 @@ Assistant:"""
             final_message_id = self._complete_streaming_message(streaming_message_id)
             logger.info(f"Completed processing for streaming message {streaming_message_id}")
             
+            # Release the thread lock after AI completes streaming
+            try:
+                self._release_thread_lock(thread_id, ai_id)
+                logger.info(f"Released thread lock for thread {thread_id} after AI {ai_id} completed streaming")
+            except Exception as lock_error:
+                logger.error(f"Failed to release thread lock for thread {thread_id}: {lock_error}")
+            
             # Check if this was a moderator response and if it selected an AI
             if ai_id == MODERATOR_AI_ID and full_response:
                 logger.info("Checking if moderator selected an AI to forward to...")
@@ -491,6 +520,13 @@ Assistant:"""
                     )
                 except Exception as complete_error:
                     logger.error(f"Failed to mark streaming message as complete on error: {complete_error}")
+            
+            # Always try to release the thread lock even on error
+            try:
+                self._release_thread_lock(thread_id, ai_id)
+                logger.info(f"Released thread lock for thread {thread_id} after error")
+            except Exception as lock_error:
+                logger.error(f"Failed to release thread lock for thread {thread_id} on error: {lock_error}")
 
     async def stream_response(self, room_id: str, thread_id: str, ai_id: str, 
                             user_message_id: str) -> AsyncGenerator[str, None]:

@@ -33,28 +33,45 @@ cp .env.example .env
 
 This is a **streaming AI chat service** built with FastAPI that provides mentor-based conversational experiences with real-time multi-client synchronization. The service integrates with Google's Gemini models via LangChain and uses Supabase for data persistence and real-time updates.
 
-### Request Flow (Updated with Streaming Messages and Lock Mechanism)
+### Request Flow (Simplified with Database-Only Locking)
 
-1. **Client Preparation**: User message is saved to `messages` table by the client
+The system uses database thread locks for all concurrency control:
+- **Database Thread Locks** (`thread_locks` table): Manages all lock states across services
+- **Fault Tolerance**: Server can acquire/transition locks if client fails
+
+1. **Client Preparation**: 
+   - User message is saved to `messages` table by the client
+   - Client attempts to create a thread lock in `thread_locks` table (lock_type: 'user_message')
+   - If client lock fails, server will handle it (fault tolerance)
+   
 2. **API Layer** (`routers/chat.py`): Receives chat request with `user_message_id`
-   - **Lock Check**: Verifies no existing request is processing for same room_id/thread_id
-   - If locked: Returns HTTP 409 (Conflict) immediately
-   - If available: Acquires lock for exclusive processing
+   - Fetches user message to get sender's profile_id
+   - **Lock Status Check**:
+     - If `ai_streaming` lock: Returns HTTP 409 (AI already processing)
+     - If `user_message` lock by different user: Returns HTTP 409 (another user sending)
+     - If `user_message` lock by same user: Proceeds to transition lock
+     - If no lock: Proceeds to create AI lock
+   - **Lock Transition**: Transitions to AI lock or creates new AI lock
+   - **Background Task**: Launches streaming process
+   - Returns streaming_message_id immediately to client
+   
 3. **Orchestration** (`services/chat_orchestrator.py`): 
    - Cleans up any incomplete streaming messages for the room/thread
    - Fetches AI configuration from `ai` table (model, system_prompt, name)
    - Retrieves user message content using `user_message_id`
    - Fetches last 10 messages from `messages` table for context
    - Constructs contextualized prompt using system_prompt
+   
 4. **Streaming Process**:
    - As chunks arrive from Gemini, they're upserted to `streaming_messages` table
    - Other clients can subscribe to `streaming_messages` changes for real-time updates
-   - Each chunk is also sent via SSE to the requesting client
+   - Database lock prevents other users from sending messages
+   
 5. **Completion**:
    - When streaming completes, `complete_streaming_message()` is called
    - Final message is saved to `messages` table
-   - Streaming message is marked as complete
-   - **Lock Release**: Lock is automatically released for the room_id/thread_id
+   - **Lock Release**: `release_thread_lock()` releases the AI lock in database
+   - On error: Lock is released to prevent deadlocks
 
 ### Key Integration Points
 
@@ -68,11 +85,20 @@ This is a **streaming AI chat service** built with FastAPI that provides mentor-
   - `is_complete`: Whether streaming has finished
   - `final_message_id`: Reference to final message once complete
   - `user_message_id`: The user message being responded to
+- `thread_locks`: Thread-level locking to prevent concurrent messages
+  - `thread_id`: The thread being locked
+  - `locked_by_profile_id`: User or AI ID holding the lock
+  - `lock_type`: 'user_message' or 'ai_streaming'
+  - `expires_at`: Auto-expiry timestamp for cleanup
 
 **Supabase Functions (RPC):**
 - `upsert_streaming_message`: Creates or updates streaming message
 - `complete_streaming_message`: Finalizes streaming and creates message record
 - `cleanup_old_streaming_messages`: Removes old completed streaming records
+- `acquire_thread_lock`: Client acquires lock before sending message
+- `release_thread_lock`: Server releases lock after AI completes
+- `transition_lock_to_ai`: Transfer lock from user to AI (optional)
+- `refresh_thread_lock`: Extend lock expiry for long operations
 
 **External Services:**
 - Google Gemini API (via GOOGLE_API_KEY)
@@ -90,22 +116,24 @@ The `ChatOrchestrator` class in `services/chat_orchestrator.py` is the core busi
 - `_save_message()`: Saves messages to database
 - `_upsert_streaming_message()`: Updates streaming state
 - `_complete_streaming_message()`: Finalizes streaming
+- `_release_thread_lock()`: Releases database thread lock after completion
 - `cleanup_incomplete_streaming_messages()`: Cleanup on start
 - `_extract_ai_name_from_moderator_response()`: Extracts selected AI name from moderator response
 - `_get_ai_id_by_name()`: Retrieves AI ID by name from room's available AIs
 
 **Lock Manager** (`services/lock_manager.py`):
-- `acquire_lock()`: Async context manager for exclusive access to room/thread
-- `is_locked()`: Check if room/thread is currently being processed
-- `get_active_locks()`: Monitor active locks for debugging
-- Automatic cleanup of unused locks to prevent memory leaks
+- `check_thread_lock()`: Checks thread lock status in database
+- `transition_to_ai_lock()`: Transitions user lock to AI lock or creates new AI lock
+- `release_thread_lock()`: Releases the thread lock after processing
+- `refresh_thread_lock()`: Extends lock expiry for long operations
 
 **Important Changes:**
 - User messages are now saved BEFORE calling the streaming API
 - The API accepts `user_message_id` instead of raw prompt text
 - Streaming messages provide real-time synchronization across clients
 - Automatic cleanup prevents orphaned streaming messages
-- Lock mechanism prevents concurrent processing for same room/thread
+- Database locks prevent concurrent processing for same thread
+- Simplified architecture uses only database locks for all concurrency control
 
 ### Moderator Flow
 
