@@ -203,15 +203,35 @@ The API uses database thread locks to prevent concurrent processing:
 - **Implementation**: `services/lock_manager.py`
 
 ### Lock Flow
-1. **Client attempts lock**: Client tries to acquire lock before sending message (`acquire_thread_lock`)
-2. **Server verification**: Server fetches user message and checks lock status:
-   - `ai_streaming` lock → Reject with HTTP 409
-   - `user_message` lock by different user → Reject with HTTP 409
-   - `user_message` lock by same user → Transition to AI lock
+
+#### Simplified Flow (Current Implementation)
+The current client implementation uses a **simplified approach** that relies primarily on server-side locking:
+
+1. **Client sends message**: User submits message → client saves to database → gets `user_message_id`
+2. **Client calls streaming endpoint**: POST to `/chat/stream` with the `user_message_id`
+3. **Server handles locking**: Server fetches user message and manages all lock logic:
+   - `ai_streaming` lock exists → Reject with HTTP 409
+   - `user_message` lock by different user → Reject with HTTP 409  
+   - `user_message` lock by same user → Transition to AI lock (`transition_lock_to_ai`)
    - No lock → Create new AI lock
-3. **Lock transition**: Server transitions or creates AI lock (`transition_lock_to_ai`)
-4. **Processing**: AI processes with exclusive thread access
-5. **Release**: Server releases lock after AI completes (`release_thread_lock`)
+4. **AI Processing**: Server processes with exclusive thread access
+5. **Lock Release**: Server releases lock after AI completes (`release_thread_lock`)
+6. **Client UI**: Client disables send button based on streaming state (`isSendingDisabled`)
+
+#### Advanced Flow (Optional Client-Side Locking)
+For more sophisticated clients that want to prevent conflicts earlier:
+
+1. **Client acquires lock**: Call `acquire_thread_lock('user_message', profile_id, thread_id)` before sending
+2. **Client sends message**: Save message to database with existing lock
+3. **Client calls streaming**: POST to `/chat/stream` endpoint
+4. **Server transitions lock**: Server calls `transition_lock_to_ai` to change lock ownership
+5. **AI Processing**: Server processes with exclusive access
+6. **Server releases lock**: Lock automatically released after completion or error
+
+#### Client UI State Management
+- **Send Button**: Disabled when `isSendingDisabled` is true (based on streaming state)
+- **Streaming State**: Managed by `useAIStreaming` hook tracking active AI responses
+- **Auto-enable**: Send button re-enabled when streaming completes (`completeStreamingMessage`)
 
 ### Lock Types
 - `user_message`: User is sending a message
