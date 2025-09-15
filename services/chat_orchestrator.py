@@ -132,7 +132,7 @@ class ChatOrchestrator:
                             enhanced_prompt += "\n\n## Available AI Mentors in this room:"
                             
                             for ai in non_moderator_ais:
-                                enhanced_prompt += f"\n- Name: {ai['name']}"
+                                enhanced_prompt += f"\n- AI name: {ai['name']}"
                                 if ai.get('description'):
                                     enhanced_prompt += f". Description: {ai['description']}"
                                 if ai.get('personality'):
@@ -145,7 +145,7 @@ When you decide to forward a user to a specific AI mentor, you MUST use this exa
 Forward to AI mentor: **{AI name}**.
 Reason is {reason why you choose them in max 100 words}
 
-IMPORTANT: Always use the exact AI name as listed above and put it between ** ** markers."""
+IMPORTANT: Always use the EXACT AI name as listed above and put it between ** ** markers."""
                     
         except Exception as e:
             logger.warning(f"Error fetching room AIs for moderator prompt: {e}")
