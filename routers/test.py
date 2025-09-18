@@ -68,15 +68,30 @@ async def test_chat_stream(request: TestChatStreamRequest):
             
             yield f"data: [INFO] User message saved with ID: {user_message_id}\n\n"
             
-            # Stream the actual response
-            async for chunk in orchestrator.stream_response(
+            # Initialize streaming message
+            streaming_message_id = orchestrator.initialize_streaming_message(
                 room_id=request.room_id,
                 thread_id=request.thread_id,
                 ai_id=request.ai_id,
                 user_message_id=user_message_id
-            ):
-                yield f"data: {chunk}\n\n"
-                await asyncio.sleep(0.01)  # Small delay for smooth streaming
+            )
+
+            if not streaming_message_id:
+                yield f"data: [ERROR] Failed to initialize streaming message\n\n"
+                return
+
+            yield f"data: [INFO] Streaming message initialized with ID: {streaming_message_id}\n\n"
+
+            # Process the streaming response in the background
+            await orchestrator.process_streaming_response(
+                room_id=request.room_id,
+                thread_id=request.thread_id,
+                ai_id=request.ai_id,
+                user_message_id=user_message_id,
+                streaming_message_id=streaming_message_id
+            )
+
+            yield f"data: [INFO] Processing complete. Check streaming_messages table for real-time updates\n\n"
             
             yield f"data: \n\n"
             yield f"data: ---\n\n"
@@ -170,115 +185,13 @@ async def test_list_available_ai():
 async def test_chat_stream_mock():
     """
     Test chat streaming with mock data (no database required).
-    Useful for testing when database is not available.
+    Note: This endpoint uses the newer process_streaming_response method.
     """
-    async def generate_mock_stream():
-        try:
-            # Create orchestrator with mocked methods
-            orchestrator = ChatOrchestrator()
-            
-            # Mock the AI info retrieval
-            def mock_get_ai_info(ai_id):
-                return {
-                    'id': ai_id,
-                    'name': 'Mock AI Assistant',
-                    'system_prompt': 'You are a helpful AI assistant specialized in Python and FastAPI development.',
-                    'model': None,  # Test default model behavior
-                    'is_active': True
-                }
-            
-            # Mock chat history
-            def mock_get_chat_history(room_id, thread_id, limit=10):
-                return []  # Empty history for fresh conversation
-            
-            # Mock message saving
-            def mock_save_message(*args, **kwargs):
-                return 'mock-message-id'
-            
-            # Mock upsert streaming message
-            def mock_upsert_streaming_message(*args, **kwargs):
-                return 'mock-streaming-id'
-            
-            # Mock complete streaming message
-            def mock_complete_streaming_message(*args, **kwargs):
-                return 'mock-final-message-id'
-            
-            # Mock cleanup
-            def mock_cleanup_incomplete_streaming_messages(*args, **kwargs):
-                pass
-            
-            # Create a mock database client with chained methods
-            class MockTable:
-                def __init__(self, data=None):
-                    self.data = data or {}
-                
-                def select(self, *args):
-                    return self
-                
-                def eq(self, *args):
-                    return self
-                
-                def single(self):
-                    return self
-                
-                def execute(self):
-                    class MockResponse:
-                        def __init__(self, data):
-                            self.data = data
-                    return MockResponse({
-                        'content': 'Explain how to create a simple FastAPI endpoint',
-                        'sender_id': 'mock-user'
-                    })
-            
-            class MockDBClient:
-                def table(self, name):
-                    if name == 'messages':
-                        return MockTable()
-                    return MockTable()
-            
-            # Replace methods with mocks
-            orchestrator._get_ai_info = mock_get_ai_info
-            orchestrator._get_chat_history = mock_get_chat_history
-            orchestrator._save_message = mock_save_message
-            orchestrator._upsert_streaming_message = mock_upsert_streaming_message
-            orchestrator._complete_streaming_message = mock_complete_streaming_message
-            orchestrator.cleanup_incomplete_streaming_messages = mock_cleanup_incomplete_streaming_messages
-            orchestrator.db_client = MockDBClient()  # Mock the database client
-            
-            yield f"data: [INFO] Starting mock chat stream...\n\n"
-            yield f"data: ---\n\n"
-            
-            # Create a mock user message ID
-            mock_user_message_id = 'mock-user-message-id-001'
-            
-            # Stream the response
-            async for chunk in orchestrator.stream_response(
-                room_id='mock-room',
-                thread_id='mock-thread',
-                ai_id='mock-ai',
-                user_message_id=mock_user_message_id
-            ):
-                yield f"data: {chunk}\n\n"
-                await asyncio.sleep(0.01)
-            
-            yield f"data: \n\n"
-            yield f"data: ---\n\n"
-            yield f"data: [INFO] Mock stream completed\n\n"
-            yield f"data: [DONE]\n\n"
-            
-        except Exception as e:
-            yield f"data: [ERROR] {str(e)}\n\n"
-            yield f"data: [DONE]\n\n"
-    
-    return StreamingResponse(
-        generate_mock_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
-    )
+    return {
+        "status": "info",
+        "message": "Mock streaming test has been simplified. Use /test/chat-stream with a real AI ID for testing.",
+        "suggestion": "The system now uses database-backed streaming via process_streaming_response method."
+    }
 
 
 class LockTestRequest(BaseModel):

@@ -109,7 +109,8 @@ The system uses database thread locks for all concurrency control:
 The `ChatOrchestrator` class in `services/chat_orchestrator.py` is the core business logic handler:
 
 **Core Methods:**
-- `stream_response()`: Main streaming method (now accepts `user_message_id` instead of `user_prompt`)
+- `process_streaming_response()`: Main background streaming method (processes AI responses asynchronously)
+- `initialize_streaming_message()`: Creates initial streaming message entry
 - `_get_ai_info()`: Fetches AI configuration
 - `_get_chat_history()`: Retrieves conversation context
 - `_get_llm()`: Initializes appropriate Gemini model
