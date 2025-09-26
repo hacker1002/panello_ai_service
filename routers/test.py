@@ -17,9 +17,9 @@ router = APIRouter()
 class TestChatStreamRequest(BaseModel):
     ai_id: str
     user_prompt: str = "What are your capabilities?"
-    room_id: str = "test-room-001"
-    thread_id: str = "test-thread-001"
-    user_id: str = "test-user-001"
+    room_id: str = "d912e11a-ef3b-46ee-8bcb-fc8e6bb02511"
+    thread_id: str = "b9748325-c24f-4224-8efb-79aa8823f586"
+    user_id: str = "2188fac8-2248-41e3-b15c-1826d14d52e7"
 
 
 @router.post("/test/chat-stream")
@@ -46,7 +46,7 @@ async def test_chat_stream(request: TestChatStreamRequest):
             # First save the user message
             import uuid
             from datetime import datetime
-            supabase: Client = create_client(settings.supabase_url, settings.supabase_key)
+            supabase: Client = create_client(settings.supabase_url, settings.supabase_service_key)
             
             user_message_data = {
                 'id': str(uuid.uuid4()),
