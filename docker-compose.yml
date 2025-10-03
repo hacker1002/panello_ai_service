@@ -1,8 +1,9 @@
-version: '3.8'
-
 services:
   panello-ai:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: panello-ai-service:latest
     container_name: panello-ai-service
     env_file:
       - .env
@@ -17,6 +18,8 @@ services:
     volumes:
       # Mount source code for development (optional, remove for production)
       - ./:/app
+      # Mount GCP service account key
+      - ./panello-sa-key.json:/app/panello-sa-key.json:ro
       # Prevent node_modules and other files from being overwritten
       - /app/__pycache__
     restart: unless-stopped
