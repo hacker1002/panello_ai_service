@@ -154,12 +154,10 @@ async def delete_room_document(file_id: str):
         if not success:
             logger.warning(f"Failed to delete file from GCS: {error_msg}, continuing with database deletion")
 
-        # Soft delete in database (set deleted_at timestamp)
-        update_result = supabase_client.table("knowledge_files").update({
-            "deleted_at": datetime.utcnow().isoformat()
-        }).eq("id", file_id).execute()
+        # Delete record from database (hard delete)
+        delete_result = supabase_client.table("knowledge_files").delete().eq("id", file_id).execute()
 
-        if not update_result.data:
+        if not delete_result.data:
             raise HTTPException(status_code=500, detail="Failed to delete file record from database")
 
         logger.info(f"File {file_id} deleted successfully")
