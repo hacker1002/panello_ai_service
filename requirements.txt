@@ -82,3 +82,4 @@ watchfiles==1.1.0
 websockets==15.0.1
 wheel==0.45.1
 zstandard==0.24.0
+google-cloud-storage==2.18.2
