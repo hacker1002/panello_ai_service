@@ -4,6 +4,7 @@ import os
 from typing import Tuple, Optional
 from core.config import settings
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,14 @@ class StorageService:
             if not is_valid:
                 return False, None, error_msg
 
-            # Create file path: rooms/{room_id}/{filename}
-            file_path = f"rooms/{room_id}/{filename}"
+            # Add timestamp to filename to avoid collisions
+            # Format: filename_yyyymmddHHmmss.extension
+            name, ext = os.path.splitext(filename)
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            timestamped_filename = f"{name}_{timestamp}{ext}"
+
+            # Create file path: rooms/{room_id}/{timestamped_filename}
+            file_path = f"rooms/{room_id}/{timestamped_filename}"
 
             # Upload to GCS
             blob = self.bucket.blob(file_path)
