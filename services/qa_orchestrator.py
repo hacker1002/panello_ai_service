@@ -15,9 +15,6 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(asctime)s - %(n
 
 logger = logging.getLogger(__name__)
 
-# Moderator AI
-MODERATOR_AI_ID = "10000000-0000-0000-0000-000000000007"
-
 # Custom AI API base URL
 QA_API_BASE_URL = "http://35.239.237.244:8000"
 
@@ -37,7 +34,7 @@ class QAOrchestrator:
     def _get_ai_info(self, ai_id: str) -> Optional[Dict[str, Any]]:
         """Fetch AI info from the 'ai' table"""
         try:
-            response = self.db_client.table('ai').select('model, system_prompt, description, personality, name').eq('id', ai_id).single().execute()
+            response = self.db_client.table('ai').select('model, system_prompt, description, personality, name, is_moderator').eq('id', ai_id).single().execute()
             return response.data
         except Exception as e:
             logger.error(f"Error fetching AI info for AI ID {ai_id}: {e}")
@@ -86,7 +83,7 @@ class QAOrchestrator:
         """Build system prompt for moderator AI including available AIs in the room"""
         # Start with enhanced base prompt
         enhanced_prompt = f"User Promt: {user_prompt}."
-        
+
         # Get all AIs in the room
         try:
             # Fetch room AIs
@@ -95,25 +92,23 @@ class QAOrchestrator:
                 .eq('room_id', room_id)\
                 .eq('is_active', True)\
                 .execute()
-            
+
             if room_ai_response.data:
-                # Filter out the moderator AI to avoid self-reference
-                ai_ids = [ra['ai_id'] for ra in room_ai_response.data 
-                         if ra['ai_id'] != MODERATOR_AI_ID]
-                
-                if ai_ids:  # Only proceed if there are non-moderator AIs
-                    # Fetch AI details for all non-moderator AIs in the room
+                ai_ids = [ra['ai_id'] for ra in room_ai_response.data]
+
+                if ai_ids:
+                    # Fetch AI details for all AIs in the room (including is_moderator field)
                     ai_details_response = self.db_client.table('ai')\
-                        .select('id, name, description, personality')\
+                        .select('id, name, description, personality, is_moderator')\
                         .in_('id', ai_ids)\
                         .eq('is_active', True)\
                         .execute()
-                    
+
                     if ai_details_response.data:
-                        # Filter out moderator again (extra safety) and build available AIs section
-                        non_moderator_ais = [ai for ai in ai_details_response.data 
-                                            if ai.get('id') != MODERATOR_AI_ID]
-                        
+                        # Filter out moderator AIs and build available AIs section
+                        non_moderator_ais = [ai for ai in ai_details_response.data
+                                            if not ai.get('is_moderator', False)]
+
                         if non_moderator_ais:
                             enhanced_prompt += "\n\n## Available AI Mentors in this room:"
 
@@ -124,7 +119,7 @@ class QAOrchestrator:
                                 if ai.get('personality'):
                                     enhanced_prompt += f". Personality: {ai['personality']}"
                                 enhanced_prompt += "."
-                    
+
         except Exception as e:
             logger.warning(f"Error fetching room AIs for moderator prompt: {e}")
             # Continue with base prompt if fetching room AIs fails
@@ -419,7 +414,8 @@ class QAOrchestrator:
             logger.debug(f"Processing AI response for streaming message {streaming_message_id}")
 
             # Check if this is the moderator AI
-            if ai_id == MODERATOR_AI_ID:
+            is_moderator = ai_info.get('is_moderator', False)
+            if is_moderator:
                 # For moderator, use professional-sync (non-streaming)
                 logger.info("Moderator AI detected, using professional-sync API")
                 prompt = self._build_moderator_system_prompt(user_prompt, room_id)
@@ -512,7 +508,7 @@ class QAOrchestrator:
                 logger.error(f"Failed to release thread lock for thread {thread_id}: {lock_error}")
 
             # Check if moderator selected an AI
-            if ai_id == MODERATOR_AI_ID and 'moderator_selected_ai_id' in locals() and moderator_selected_ai_id:
+            if is_moderator and 'moderator_selected_ai_id' in locals() and moderator_selected_ai_id:
                 logger.info(f"Moderator selected AI ID: {moderator_selected_ai_id}. Triggering next stream...")
 
                 # Verify the AI exists
@@ -542,7 +538,7 @@ class QAOrchestrator:
                         logger.error(f"Failed to initialize streaming message for selected AI {moderator_selected_ai_id}")
                 else:
                     logger.warning(f"Selected AI ID {moderator_selected_ai_id} not found in database")
-            elif ai_id == MODERATOR_AI_ID:
+            elif is_moderator:
                 logger.info("Moderator response did not select a specific AI")
 
         except Exception as e:
