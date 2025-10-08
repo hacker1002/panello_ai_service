@@ -7,9 +7,9 @@
 
 ## Core Endpoints
 
-### 1. Initialize Chat Stream
+### 1. Initialize Chat Stream (LangChain/Gemini)
 
-Initiates AI response processing and returns a streaming_message_id for real-time subscription.
+Initiates AI response processing using Google Gemini via LangChain and returns a streaming_message_id for real-time subscription.
 
 **Endpoint:** `POST /chat/stream`
 
@@ -50,9 +50,58 @@ curl -X POST http://localhost:8000/chat/stream \
   }'
 ```
 
+### 2. Initialize QA Stream (Document QA API)
+
+Initiates AI response processing using a custom document-based QA API and returns a streaming_message_id for real-time subscription.
+
+**Endpoint:** `POST /qa/stream`
+
+**Request:**
+```json
+{
+  "room_id": "uuid",
+  "thread_id": "uuid",
+  "ai_id": "uuid",
+  "user_message_id": "uuid"
+}
+```
+
+**Response:**
+```json
+{
+  "streaming_message_id": "uuid",
+  "status": "processing"
+}
+```
+
+**Status Codes:**
+- `200` - Success
+- `400` - Missing required fields
+- `404` - AI or message not found
+- `409` - Conflict - Another request is already being processed for the same room/thread
+- `500` - Server error
+
+**Backend Integration:**
+- **Moderator AI** (`is_moderator: true`): Uses `/api/qa/professional-sync` (synchronous, returns JSON with `ai_id` and `message`)
+- **Normal AI**: Uses `/api/qa/professional-stream` (streaming, returns chunks)
+- **History Format**: Converts chat history to Question/Answer pairs
+- **API URL**: `http://35.239.237.244:8000`
+
+**Example:**
+```bash
+curl -X POST http://localhost:8000/qa/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "room_id": "123e4567-e89b-12d3-a456-426614174000",
+    "thread_id": "123e4567-e89b-12d3-a456-426614174001",
+    "ai_id": "123e4567-e89b-12d3-a456-426614174002",
+    "user_message_id": "123e4567-e89b-12d3-a456-426614174003"
+  }'
+```
+
 ## Test Endpoints
 
-### 2. Test Chat Stream
+### 3. Test Chat Stream
 
 Test endpoint that handles message saving and streaming in one call.
 
@@ -71,7 +120,7 @@ Test endpoint that handles message saving and streaming in one call.
 
 **Response:** Server-Sent Events stream
 
-### 3. List Available AIs
+### 4. List Available AIs
 
 **Endpoint:** `GET /test/list-ai`
 
@@ -90,7 +139,7 @@ Test endpoint that handles message saving and streaming in one call.
 }
 ```
 
-### 4. Get AI Information
+### 5. Get AI Information
 
 **Endpoint:** `GET /test/ai-info/{ai_id}`
 
@@ -109,7 +158,7 @@ Test endpoint that handles message saving and streaming in one call.
 }
 ```
 
-### 5. Mock Chat Stream
+### 6. Mock Chat Stream
 
 **Endpoint:** `POST /test/chat-stream-mock`
 
@@ -143,7 +192,7 @@ All errors follow this format:
 
 ## Lock Testing Endpoints
 
-### 6. Test Lock Mechanism
+### 7. Test Lock Mechanism
 
 Simulates a long-running request to test the lock mechanism.
 
@@ -168,7 +217,7 @@ Simulates a long-running request to test the lock mechanism.
 }
 ```
 
-### 7. Check Lock Status
+### 8. Check Lock Status
 
 View currently active locks and memory usage.
 
@@ -185,7 +234,7 @@ View currently active locks and memory usage.
 }
 ```
 
-### 8. Test Concurrent Locks
+### 9. Test Concurrent Locks
 
 Tests concurrent lock acquisition with 5 simultaneous attempts.
 

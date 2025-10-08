@@ -2,7 +2,12 @@
 
 ## Overview
 
-The Panello AI Service uses a background processing architecture with Supabase real-time subscriptions for scalable, multi-client AI chat streaming.
+The Panello AI Service uses a background processing architecture with Supabase real-time subscriptions for scalable, multi-client AI chat streaming. The service supports two backend integrations:
+
+1. **Chat Router** (`/chat/stream`): Google Gemini via LangChain
+2. **QA Router** (`/qa/stream`): Custom document-based QA API
+
+Both routers share the same database architecture and streaming mechanism.
 
 ## Architecture Flow
 
@@ -51,6 +56,7 @@ ai
 ├── name (TEXT)
 ├── model (TEXT, nullable)
 ├── system_prompt (TEXT)
+├── is_moderator (BOOLEAN)
 └── is_active (BOOLEAN)
 
 -- Permanent Messages
@@ -95,13 +101,13 @@ cleanup_old_streaming_messages(p_hours_old) RETURNS INTEGER
 
 ## Service Layer
 
-### ChatOrchestrator Methods
+### ChatOrchestrator Methods (LangChain/Gemini)
 
 ```python
 # Initialize streaming
 initialize_streaming_message(room_id, thread_id, ai_id, user_message_id) -> str
 
-# Process in background
+# Process in background using LangChain
 async process_streaming_response(room_id, thread_id, ai_id, user_message_id, streaming_message_id)
 
 # Cleanup incomplete streams
@@ -114,22 +120,48 @@ _extract_ai_name_from_moderator_response(response: str) -> Optional[str]
 _get_ai_id_by_name(ai_name: str, room_id: str) -> Optional[str]
 ```
 
+### QAOrchestrator Methods (Custom QA API)
+
+```python
+# Initialize streaming (same as ChatOrchestrator)
+initialize_streaming_message(room_id, thread_id, ai_id, user_message_id) -> str
+
+# Process in background using HTTP requests to QA API
+async process_streaming_response(room_id, thread_id, ai_id, user_message_id, streaming_message_id)
+
+# Format chat history as Question/Answer pairs for API
+_format_chat_history_for_api(messages: List[Dict], ai_name: str) -> List[Dict]
+
+# Build moderator prompt with available AIs
+_build_moderator_system_prompt(user_prompt: str, room_id: str) -> str
+
+# Call synchronous QA API (for moderator)
+async _call_professional_sync(question_text, model, ai_info, room_id, histories_chat) -> Optional[str]
+
+# Call streaming QA API (for normal AI)
+async _call_professional_stream(question_text, model, ai_info, room_id, histories_chat, ...) -> str
+```
+
 ### Moderator Flow
 
-The system includes a special moderator AI (ID: `10000000-0000-0000-0000-000000000007`) that can automatically forward users to appropriate AI mentors:
+The system supports moderator AIs (identified by `is_moderator: true` in the `ai` table) that can automatically forward users to appropriate AI mentors:
 
-1. **Detection**: When `ai_id == MODERATOR_AI_ID`, the system builds an enhanced prompt with all available AIs in the room
-2. **Response Format**: The moderator uses a specific format:
-   ```
-   Forward to AI mentor: **{AI name}**.
-   Reason is {reason why you choose them in max 100 words}
-   ```
+1. **Detection**: When `is_moderator == true`, the system builds an enhanced prompt with all available non-moderator AIs in the room
+2. **Response Formats**:
+   - **Chat Router**: Moderator responds with pattern `Forward to AI mentor: **{AI name}**`
+     - Extracts AI name using regex pattern `**{AI name}**`
+     - Looks up AI ID by name (case-insensitive)
+   - **QA Router**: Moderator responds with JSON containing `ai_id` and `message` fields
+     - Directly uses the `ai_id` from the response
 3. **Auto-Trigger**: After moderator completes streaming:
-   - Extract AI name using regex pattern `**{AI name}**`
-   - Look up AI ID by name (case-insensitive)
-   - Automatically trigger new stream to selected AI
-   - Use same `user_message_id` for continuity
-4. **Real-time Updates**: Both moderator and selected AI responses update via `streaming_messages` table
+   - System automatically triggers new stream to selected AI
+   - Uses same `user_message_id` for continuity
+4. **Key Features**:
+   - Dynamic moderator detection via database field (no hardcoded IDs)
+   - Multiple moderators can exist in the system
+   - Moderators filtered out from available AI lists (self-reference prevention)
+   - Real-time updates via `streaming_messages` table
+   - Graceful handling if no AI is selected or found
 
 ## Multi-Client Synchronization
 

@@ -18,9 +18,6 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(asctime)s - %(n
 
 logger = logging.getLogger(__name__)
 
-# Moderator AI
-MODERATOR_AI_ID = "10000000-0000-0000-0000-000000000007"
-
 class ChatOrchestrator:
     def __init__(self):
         self.db_client = supabase_client
@@ -38,7 +35,7 @@ class ChatOrchestrator:
     def _get_ai_info(self, ai_id: str) -> Optional[Dict[str, Any]]:
         """Fetch AI info from the 'ai' table"""
         try:
-            response = self.db_client.table('ai').select('model, system_prompt, description, personality, name').eq('id', ai_id).single().execute()
+            response = self.db_client.table('ai').select('model, system_prompt, description, personality, name, is_moderator').eq('id', ai_id).single().execute()
             return response.data
         except Exception as e:
             logger.error(f"Error fetching AI info for AI ID {ai_id}: {e}")
@@ -102,7 +99,7 @@ class ChatOrchestrator:
         enhanced_prompt = self._build_enhanced_system_prompt(
             base_prompt, ai_name, description, personality
         )
-        
+
         # Get all AIs in the room
         try:
             # Fetch room AIs
@@ -111,25 +108,23 @@ class ChatOrchestrator:
                 .eq('room_id', room_id)\
                 .eq('is_active', True)\
                 .execute()
-            
+
             if room_ai_response.data:
-                # Filter out the moderator AI to avoid self-reference
-                ai_ids = [ra['ai_id'] for ra in room_ai_response.data 
-                         if ra['ai_id'] != MODERATOR_AI_ID]
-                
-                if ai_ids:  # Only proceed if there are non-moderator AIs
-                    # Fetch AI details for all non-moderator AIs in the room
+                ai_ids = [ra['ai_id'] for ra in room_ai_response.data]
+
+                if ai_ids:
+                    # Fetch AI details for all AIs in the room (including is_moderator field)
                     ai_details_response = self.db_client.table('ai')\
-                        .select('id, name, description, personality')\
+                        .select('id, name, description, personality, is_moderator')\
                         .in_('id', ai_ids)\
                         .eq('is_active', True)\
                         .execute()
-                    
+
                     if ai_details_response.data:
-                        # Filter out moderator again (extra safety) and build available AIs section
-                        non_moderator_ais = [ai for ai in ai_details_response.data 
-                                            if ai.get('id') != MODERATOR_AI_ID]
-                        
+                        # Filter out moderator AIs and build available AIs section
+                        non_moderator_ais = [ai for ai in ai_details_response.data
+                                            if not ai.get('is_moderator', False)]
+
                         if non_moderator_ais:
                             enhanced_prompt += "\n\n## Available AI Mentors in this room:"
 
@@ -140,11 +135,11 @@ class ChatOrchestrator:
                                 if ai.get('personality'):
                                     enhanced_prompt += f". Personality: {ai['personality']}"
                                 enhanced_prompt += "."
-                    
+
         except Exception as e:
             logger.warning(f"Error fetching room AIs for moderator prompt: {e}")
             # Continue with base prompt if fetching room AIs fails
-        
+
         return enhanced_prompt
 
     def _get_llm(self, model: Optional[str] = None) -> ChatGoogleGenerativeAI:
@@ -332,9 +327,10 @@ class ChatOrchestrator:
             ai_name = ai_info.get('name', 'Assistant')
             description = ai_info.get('description', '')
             personality = ai_info.get('personality', '')
-            
+            is_moderator = ai_info.get('is_moderator', False)
+
             # Build enhanced system prompt
-            if ai_id == MODERATOR_AI_ID:
+            if is_moderator:
                 # For moderator AI, include available AIs in the room
                 system_prompt = self._build_moderator_system_prompt(
                     base_system_prompt, room_id, ai_name, description, personality
@@ -378,7 +374,7 @@ Assistant:"""
             logger.debug(f"Processing AI response for streaming message {streaming_message_id}")
 
             # Check if this is the moderator AI
-            if ai_id == MODERATOR_AI_ID:
+            if is_moderator:
                 # For moderator, get full response without streaming
                 logger.info("Moderator AI detected, getting full response without streaming")
                 result = await chain.ainvoke(inputs)
@@ -465,7 +461,7 @@ Assistant:"""
                 logger.error(f"Failed to release thread lock for thread {thread_id}: {lock_error}")
             
             # Check if moderator selected an AI
-            if ai_id == MODERATOR_AI_ID and 'moderator_selected_ai_id' in locals() and moderator_selected_ai_id:
+            if is_moderator and 'moderator_selected_ai_id' in locals() and moderator_selected_ai_id:
                 logger.info(f"Moderator selected AI ID: {moderator_selected_ai_id}. Triggering next stream...")
 
                 # Verify the AI exists
@@ -495,7 +491,7 @@ Assistant:"""
                         logger.error(f"Failed to initialize streaming message for selected AI {moderator_selected_ai_id}")
                 else:
                     logger.warning(f"Selected AI ID {moderator_selected_ai_id} not found in database")
-            elif ai_id == MODERATOR_AI_ID:
+            elif is_moderator:
                 logger.info("Moderator response did not select a specific AI")
             
         except Exception as e:

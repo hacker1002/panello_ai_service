@@ -31,7 +31,12 @@ cp .env.example .env
 
 ## Architecture Overview
 
-This is a **streaming AI chat service** built with FastAPI that provides mentor-based conversational experiences with real-time multi-client synchronization. The service integrates with Google's Gemini models via LangChain and uses Supabase for data persistence and real-time updates.
+This is a **streaming AI chat service** built with FastAPI that provides mentor-based conversational experiences with real-time multi-client synchronization. The service supports two backends:
+
+1. **Chat Router** (`/chat/stream`): Integrates with Google's Gemini models via LangChain
+2. **QA Router** (`/qa/stream`): Integrates with a custom document QA API (http://35.239.237.244:8000)
+
+Both services use Supabase for data persistence and real-time updates.
 
 ### Request Flow (Simplified with Database-Only Locking)
 
@@ -44,7 +49,7 @@ The system uses database thread locks for all concurrency control:
    - Client attempts to create a thread lock in `thread_locks` table (lock_type: 'user_message')
    - If client lock fails, server will handle it (fault tolerance)
    
-2. **API Layer** (`routers/chat.py`): Receives chat request with `user_message_id`
+2. **API Layer** (`routers/chat.py` or `routers/qa.py`): Receives chat request with `user_message_id`
    - Fetches user message to get sender's profile_id
    - **Lock Status Check**:
      - If `ai_streaming` lock: Returns HTTP 409 (AI already processing)
@@ -54,13 +59,22 @@ The system uses database thread locks for all concurrency control:
    - **Lock Transition**: Transitions to AI lock or creates new AI lock
    - **Background Task**: Launches streaming process
    - Returns streaming_message_id immediately to client
-   
-3. **Orchestration** (`services/chat_orchestrator.py`): 
-   - Cleans up any incomplete streaming messages for the room/thread
-   - Fetches AI configuration from `ai` table (model, system_prompt, name)
-   - Retrieves user message content using `user_message_id`
-   - Fetches last 10 messages from `messages` table for context
-   - Constructs contextualized prompt using system_prompt
+
+3. **Orchestration**:
+   - **Chat Orchestrator** (`services/chat_orchestrator.py`): Uses LangChain + Google Gemini
+     - Cleans up any incomplete streaming messages for the room/thread
+     - Fetches AI configuration from `ai` table (model, system_prompt, name, is_moderator)
+     - Retrieves user message content using `user_message_id`
+     - Fetches last 10 messages from `messages` table for context
+     - Constructs contextualized prompt using system_prompt
+     - Streams responses using LangChain's astream
+
+   - **QA Orchestrator** (`services/qa_orchestrator.py`): Uses custom document QA API
+     - Same database operations as ChatOrchestrator
+     - Formats chat history as Question/Answer pairs
+     - For moderator AI: Calls `/api/qa/professional-sync` (synchronous, returns JSON with `ai_id` and `message`)
+     - For normal AI: Calls `/api/qa/professional-stream` (streaming, returns chunks with `status` and `chunk`)
+     - Processes streaming responses and updates Supabase in real-time
    
 4. **Streaming Process**:
    - As chunks arrive from Gemini, they're upserted to `streaming_messages` table
@@ -76,9 +90,10 @@ The system uses database thread locks for all concurrency control:
 ### Key Integration Points
 
 **Supabase Tables:**
-- `ai`: Stores AI configurations (id, name, model, system_prompt)
+- `ai`: Stores AI configurations (id, name, model, system_prompt, is_moderator)
   - `model`: Specifies which Gemini model to use (null defaults to gemini-2.0-flash-exp)
   - `system_prompt`: The AI's behavioral instructions
+  - `is_moderator`: Boolean flag to identify moderator AIs
 - `messages`: Permanent message storage (room_id, thread_id, content, sender_type, sender_id)
 - `streaming_messages`: Temporary streaming state for active AI responses
   - `content`: Accumulated streaming content
@@ -101,17 +116,20 @@ The system uses database thread locks for all concurrency control:
 - `refresh_thread_lock`: Extend lock expiry for long operations
 
 **External Services:**
-- Google Gemini API (via GOOGLE_API_KEY)
+- Google Gemini API (via GOOGLE_API_KEY) - Used by Chat Router
+- Custom Document QA API (http://35.239.237.244:8000) - Used by QA Router
+  - `/api/qa/professional-sync`: Synchronous QA endpoint for moderators
+  - `/api/qa/professional-stream`: Streaming QA endpoint for normal AIs
 - Supabase Database (via SUPABASE_URL and SUPABASE_KEY)
 
 ### Service Layer Pattern
 
-The `ChatOrchestrator` class in `services/chat_orchestrator.py` is the core business logic handler:
+**ChatOrchestrator** (`services/chat_orchestrator.py`): Core business logic for LangChain/Gemini integration
 
 **Core Methods:**
 - `process_streaming_response()`: Main background streaming method (processes AI responses asynchronously)
 - `initialize_streaming_message()`: Creates initial streaming message entry
-- `_get_ai_info()`: Fetches AI configuration
+- `_get_ai_info()`: Fetches AI configuration including `is_moderator` field
 - `_get_chat_history()`: Retrieves conversation context
 - `_get_llm()`: Initializes appropriate Gemini model
 - `_save_message()`: Saves messages to database
@@ -121,6 +139,21 @@ The `ChatOrchestrator` class in `services/chat_orchestrator.py` is the core busi
 - `cleanup_incomplete_streaming_messages()`: Cleanup on start
 - `_extract_ai_name_from_moderator_response()`: Extracts selected AI name from moderator response
 - `_get_ai_id_by_name()`: Retrieves AI ID by name from room's available AIs
+
+**QAOrchestrator** (`services/qa_orchestrator.py`): Core business logic for custom document QA API integration
+
+**Core Methods:**
+- `process_streaming_response()`: Main background streaming method using HTTP requests to QA API
+- `initialize_streaming_message()`: Creates initial streaming message entry (same as ChatOrchestrator)
+- `_get_ai_info()`: Fetches AI configuration including `is_moderator` field
+- `_get_chat_history()`: Retrieves conversation context
+- `_format_chat_history_for_api()`: Formats history as Question/Answer pairs for QA API
+- `_build_moderator_system_prompt()`: Builds prompt with available AIs list for moderator
+- `_call_professional_sync()`: HTTP POST to `/api/qa/professional-sync` for moderator responses
+- `_call_professional_stream()`: HTTP POST to `/api/qa/professional-stream` for streaming responses
+- `_upsert_streaming_message()`: Updates streaming state (same as ChatOrchestrator)
+- `_complete_streaming_message()`: Finalizes streaming (same as ChatOrchestrator)
+- `_release_thread_lock()`: Releases database thread lock after completion
 
 **Lock Manager** (`services/lock_manager.py`):
 - `check_thread_lock()`: Checks thread lock status in database
@@ -138,27 +171,86 @@ The `ChatOrchestrator` class in `services/chat_orchestrator.py` is the core busi
 
 ### Moderator Flow
 
-The system includes a special moderator AI (ID: `10000000-0000-0000-0000-000000000007`) that can automatically forward users to the most appropriate AI mentor:
+The system supports moderator AIs (identified by `is_moderator: true` in the `ai` table) that can automatically forward users to the most appropriate AI mentor:
+
+**Moderator Detection:**
+- System checks the `is_moderator` field from the `ai` table
+- If `is_moderator == true`, the AI is treated as a moderator
 
 **Moderator Process:**
-1. When `ai_id == MODERATOR_AI_ID`, the system builds an enhanced prompt including all available AIs in the room
-2. The moderator AI responds with a specific format when selecting an AI:
-   ```
-   Forward to AI mentor: **{AI name}**.
-   Reason is {reason why you choose them in max 100 words}
-   ```
-3. After the moderator completes streaming, the backend:
+1. When `is_moderator == true`, the system builds an enhanced prompt including all available non-moderator AIs in the room
+2. **Chat Router**: The moderator AI responds with a pattern like `Forward to AI mentor: **{AI name}**`
    - Extracts the AI name using regex pattern `**{AI name}**`
    - Looks up the AI ID by name from the room's available AIs
+3. **QA Router**: The moderator AI responds with JSON containing `ai_id` and `message` fields
+   - Directly uses the `ai_id` from the response
+4. After the moderator completes streaming, the backend:
    - Automatically triggers a new stream to the selected AI
    - Uses the same `user_message_id` for continuity
 
 **Key Features:**
-- The moderator cannot select itself (self-reference prevention)
-- Case-insensitive AI name matching
+- Dynamic moderator detection via database field (no hardcoded IDs)
+- Multiple moderators can exist in the system
+- Moderators are filtered out from available AI lists (self-reference prevention)
 - Automatic background processing of the next AI stream
 - Real-time updates via streaming_messages table
 - Graceful handling if no AI is selected or found
+
+### QA API Integration Details
+
+The QA router integrates with a custom document-based QA service:
+
+**Request Format** (both endpoints):
+```json
+{
+  "question_text": "User's question with optional system prompt context",
+  "model": "gemini-2.5-flash",
+  "ai_info": {
+    "id": "ai-uuid",
+    "name": "AI Name",
+    "description": "AI description",
+    "personality": "AI personality",
+    "system_prompt": "System instructions"
+  },
+  "room_id": "room-uuid",
+  "top_k": 10,
+  "histories_chat": [
+    {
+      "Question": "Previous user question",
+      "Answer": "Previous AI answer"
+    }
+  ],
+  "embedding_model": "embedding-001"
+}
+```
+
+**Response Format** (`/api/qa/professional-sync`):
+```json
+{
+  "id": "chatcmpl-xxx",
+  "timestamp": "2025-10-08T07:11:10.948958Z",
+  "modelId": "gemini-2.5-flash",
+  "messages": [
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "```json\n{\"message\": \"Response text\", \"ai_id\": \"selected-ai-uuid\"}\n```"
+        }
+      ],
+      "id": "message-uuid"
+    }
+  ]
+}
+```
+
+**Streaming Response Format** (`/api/qa/professional-stream`):
+```
+{"status": "answering", "chunk": "text chunk"}
+{"status": "answering", "chunk": "more text"}
+{"status": "complete", "message": "Answer generation completed"}
+```
 
 ### Configuration Management
 
