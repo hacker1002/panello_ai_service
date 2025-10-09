@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(asctime)s - %(n
 logger = logging.getLogger(__name__)
 
 # Custom AI API base URL
-QA_API_BASE_URL = "http://35.239.237.244:8000"
+QA_API_BASE_URL = "http://34.27.126.117:8000"
 
 class QAOrchestrator:
     def __init__(self):
