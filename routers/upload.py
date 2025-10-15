@@ -4,12 +4,89 @@ from typing import Optional
 import logging
 import os
 from datetime import datetime
+import httpx
 
 from services.storage_service import storage_service
 from core.supabase_client import supabase_client
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# External document processing API configuration
+EXTERNAL_DOC_API_BASE_URL = "http://34.27.126.117:8000"
+EXTERNAL_DOC_API_TIMEOUT = 30.0  # seconds
+
+async def call_external_upload_api(
+    file_id: str,
+    file_url: str,
+    room_id: str,
+    user_id: str,
+    file_name: str,
+    content_type: str
+) -> bool:
+    """
+    Call external document processing API to upload a document
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        payload = {
+            "file_id": file_id,
+            "file_url": file_url,
+            "ai_info": {},  # Empty dict as per API spec
+            "room_id": room_id,
+            "user_id": user_id,
+            "file_name": file_name,
+            "content_type": content_type
+        }
+
+        async with httpx.AsyncClient(timeout=EXTERNAL_DOC_API_TIMEOUT) as client:
+            response = await client.post(
+                f"{EXTERNAL_DOC_API_BASE_URL}/api/documents/upload",
+                json=payload
+            )
+
+            if response.status_code == 200:
+                logger.info(f"Successfully called external upload API for file {file_id}")
+                return True
+            else:
+                logger.error(f"External upload API failed with status {response.status_code}: {response.text}")
+                return False
+
+    except httpx.TimeoutException:
+        logger.error(f"External upload API timeout for file {file_id}")
+        return False
+    except Exception as e:
+        logger.error(f"Error calling external upload API for file {file_id}: {str(e)}")
+        return False
+
+async def call_external_delete_api(file_id: str) -> bool:
+    """
+    Call external document processing API to delete a document
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        async with httpx.AsyncClient(timeout=EXTERNAL_DOC_API_TIMEOUT) as client:
+            response = await client.delete(
+                f"{EXTERNAL_DOC_API_BASE_URL}/api/documents/delete/{file_id}"
+            )
+
+            if response.status_code == 200:
+                logger.info(f"Successfully called external delete API for file {file_id}")
+                return True
+            else:
+                logger.error(f"External delete API failed with status {response.status_code}: {response.text}")
+                return False
+
+    except httpx.TimeoutException:
+        logger.error(f"External delete API timeout for file {file_id}")
+        return False
+    except Exception as e:
+        logger.error(f"Error calling external delete API for file {file_id}: {str(e)}")
+        return False
 
 class FileUploadResponse(BaseModel):
     file_id: str
@@ -106,11 +183,31 @@ async def upload_room_document(
             raise HTTPException(status_code=500, detail="Failed to save file record to database")
 
         file_record = db_result.data[0]
+        file_id = file_record["id"]
+
+        # Call external document processing API after successful Supabase insert
+        external_api_success = await call_external_upload_api(
+            file_id=file_id,
+            file_url=file_url,
+            room_id=room_id,
+            user_id=uploaded_by,
+            file_name=file.filename,
+            content_type=content_type
+        )
+
+        if not external_api_success:
+            # Rollback: delete from Supabase and GCS
+            supabase_client.table("knowledge_files").delete().eq("id", file_id).execute()
+            storage_service.delete_file(file_path)
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to process document with external API. Upload has been rolled back."
+            )
 
         logger.info(f"File {file.filename} uploaded successfully to room {room_id} by user {uploaded_by}")
 
         return FileUploadResponse(
-            file_id=file_record["id"],
+            file_id=file_id,
             file_name=file.filename,
             file_path=file_path,
             file_size=file_size,
@@ -148,6 +245,11 @@ async def delete_room_document(file_id: str):
 
         file_record = file_result.data[0]
         file_path = file_record["file_path"]
+
+        # Call external document processing API before deleting from Supabase
+        external_delete_success = await call_external_delete_api(file_id)
+        if not external_delete_success:
+            logger.warning(f"Failed to delete file {file_id} from external API, continuing with local deletion")
 
         # Delete from GCS
         success, error_msg = storage_service.delete_file(file_path)
