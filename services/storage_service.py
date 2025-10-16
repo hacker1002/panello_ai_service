@@ -90,6 +90,51 @@ class StorageService:
             logger.error(f"Failed to upload file {filename}: {str(e)}")
             return False, None, f"Upload failed: {str(e)}"
 
+    def upload_ai_file(
+        self,
+        file_content: bytes,
+        filename: str,
+        ai_id: str,
+        content_type: str
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
+        """
+        Upload file to GCS for AI
+
+        Args:
+            file_content: File content as bytes
+            filename: Original filename
+            ai_id: AI ID for organizing files
+            content_type: MIME type of the file
+
+        Returns:
+            Tuple of (success, file_path, error_message)
+        """
+        try:
+            # Validate file
+            is_valid, error_msg = self.validate_file(filename, len(file_content))
+            if not is_valid:
+                return False, None, error_msg
+
+            # Add timestamp to filename to avoid collisions
+            # Format: filename_yyyymmddHHmmss.extension
+            name, ext = os.path.splitext(filename)
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            timestamped_filename = f"{name}_{timestamp}{ext}"
+
+            # Create file path: ai/{ai_id}/{timestamped_filename}
+            file_path = f"ai/{ai_id}/{timestamped_filename}"
+
+            # Upload to GCS
+            blob = self.bucket.blob(file_path)
+            blob.upload_from_string(file_content, content_type=content_type)
+
+            logger.info(f"Successfully uploaded file {filename} to {file_path}")
+            return True, file_path, None
+
+        except Exception as e:
+            logger.error(f"Failed to upload file {filename}: {str(e)}")
+            return False, None, f"Upload failed: {str(e)}"
+
     def delete_file(self, file_path: str) -> Tuple[bool, Optional[str]]:
         """
         Delete file from GCS
